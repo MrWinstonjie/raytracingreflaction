@@ -1,0 +1,748 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Raytracing with Reflection and Refraction - Multiple Objects with Lighting and Shadows</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- Load gl-matrix -->
+    <script src="https://unpkg.com/gl-matrix@3.4.3/gl-matrix-min.js"></script>
+    <style>
+        canvas {
+            border: 1px solid black;
+            display: block;
+            margin: 20px auto;
+        }
+        body {
+            background-color: #f0f0f0;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+        }
+        #error {
+            color: red;
+            text-align: center;
+            margin-top: 20px;
+        }
+        #controls {
+            margin: 10px auto;
+            padding: 10px;
+            background-color: #fff;
+            border-radius: 5px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+            text-align: center;
+        }
+        #controls label {
+            font-weight: bold;
+            margin-right: 10px;
+        }
+        #ior-value {
+            font-weight: bold;
+            width: 40px;
+            display: inline-block;
+        }
+        #render-btn {
+            margin-left: 15px;
+            padding: 5px 15px;
+            background-color: #4CAF50;
+            border: none;
+            color: white;
+            cursor: pointer;
+            border-radius: 4px;
+        }
+        #render-btn:hover {
+            background-color: #45a049;
+        }
+    </style>
+</head>
+<body>
+    <div id="controls">
+        <label for="ior-slider">Glass Refraction Index:</label>
+        <input type="range" id="ior-slider" min="1.0" max="2.5" step="0.05" value="1.5">
+        <span id="ior-value">1.5</span>
+        <button id="render-btn">Render</button>
+    </div>
+    <canvas id="canvas" width="600" height="600"></canvas>
+    <div id="error"></div>
+    
+    <!-- All code in a single script tag -->
+    <script>
+        // Check if gl-matrix is loaded
+        if (typeof glMatrix === 'undefined') {
+            document.getElementById('error').textContent = 'Error: gl-matrix library not loaded!';
+            throw new Error('gl-matrix not loaded');
+        }
+
+        /************** HELPER.JS CODE ****************/
+        // Vector and Matrix operations using gl-matrix
+        const vec3 = glMatrix.vec3;
+        const mat4 = glMatrix.mat4;
+
+        // Vector operations
+        function add(a, b) {
+            return vec3.add(vec3.create(), a, b);
+        }
+
+        function subtract(a, b) {
+            return vec3.subtract(vec3.create(), a, b);
+        }
+
+        function scale(v, s) {
+            return vec3.scale(vec3.create(), v, s);
+        }
+
+        function normalize(v) {
+            return vec3.normalize(vec3.create(), v);
+        }
+
+        function dot(a, b) {
+            return vec3.dot(a, b);
+        }
+
+        function length(v) {
+            return vec3.length(v);
+        }
+
+        // Refraction calculation (Snell's law)
+        function refract(incident, normal, refractionRatio) {
+            const cosi = -Math.min(Math.max(dot(incident, normal), -1.0), 1.0);
+            const etai = cosi > 0 ? refractionRatio : 1.0;
+            const etat = cosi > 0 ? 1.0 : refractionRatio;
+            const eta = etai / etat;
+            
+            const k = 1.0 - eta * eta * (1.0 - cosi * cosi);
+            
+            if (k < 0) {
+                // Total internal reflection
+                return reflect(incident, normal);
+            }
+            
+            const parallPart = scale(incident, eta);
+            const perpPart = scale(normal, eta * cosi - Math.sqrt(k));
+            return normalize(add(parallPart, perpPart));
+        }
+
+        // Fresnel equation to calculate reflection coefficient
+        function fresnel(incident, normal, ior) {
+            // Use approximation of Fresnel equation
+            let cosi = Math.min(Math.max(dot(incident, normal), -1.0), 1.0);
+            let etai = 1.0;
+            let etat = ior;
+            
+            if (cosi > 0) {
+                // Swap indices of refraction if exiting medium
+                const temp = etai;
+                etai = etat;
+                etat = temp;
+            }
+            
+            // Compute sini using Snell's law
+            const sint = etai / etat * Math.sqrt(Math.max(0, 1 - cosi * cosi));
+            
+            // Total internal reflection
+            if (sint >= 1) {
+                return 1.0;
+            }
+            
+            const cost = Math.sqrt(Math.max(0, 1 - sint * sint));
+            cosi = Math.abs(cosi);
+            
+            const Rs = ((etat * cosi) - (etai * cost)) / ((etat * cosi) + (etai * cost));
+            const Rp = ((etai * cosi) - (etat * cost)) / ((etai * cosi) + (etat * cost));
+            
+            return (Rs * Rs + Rp * Rp) / 2;
+        }
+
+        // Ray structure
+        class Ray {
+            constructor(origin, direction) {
+                this.origin = origin;
+                this.direction = direction;
+            }
+        }
+
+        // Sphere structure
+        class Sphere {
+            constructor(center, radius, material) {
+                if (!center || !radius) {
+                    throw new Error('Sphere requires center and radius');
+                }
+                this.center = center;
+                this.radius = radius;
+                this.material = material;
+            }
+
+            // Calculate normal at intersection point
+            getNormal(intersectionPoint) {
+                if (!intersectionPoint) {
+                    throw new Error('Intersection point is required');
+                }
+                return normalize(subtract(intersectionPoint, this.center));
+            }
+
+            // Calculate intersection point
+            getIntersectionPoint(ray, t) {
+                if (!ray || t === undefined) {
+                    throw new Error('Ray and t parameter are required');
+                }
+                return add(ray.origin, scale(ray.direction, t));
+            }
+        }
+
+        // Plane structure
+        class Plane {
+            constructor(point, normal, material) {
+                if (!point || !normal) {
+                    throw new Error('Plane requires point and normal');
+                }
+                this.point = point;
+                this.normal = normalize(normal);
+                this.material = material;
+            }
+
+            // Normal is the same everywhere on the plane
+            getNormal() {
+                return this.normal;
+            }
+
+            // Calculate intersection point
+            getIntersectionPoint(ray, t) {
+                if (!ray || t === undefined) {
+                    throw new Error('Ray and t parameter are required');
+                }
+                return add(ray.origin, scale(ray.direction, t));
+            }
+        }
+
+        // Ray-Sphere intersection
+        function intersectRaySphere(ray, sphere) {
+            if (!ray || !sphere) {
+                throw new Error('Ray and sphere are required');
+            }
+            
+            const oc = subtract(ray.origin, sphere.center);
+            const a = dot(ray.direction, ray.direction);
+            const b = 2.0 * dot(oc, ray.direction);
+            const c = dot(oc, oc) - sphere.radius * sphere.radius;
+            const discriminant = b * b - 4 * a * c;
+
+            if (discriminant < 0) {
+                return -1; // No intersection
+            }
+
+            const t = (-b - Math.sqrt(discriminant)) / (2.0 * a);
+            return t;
+        }
+
+        // Ray-Plane intersection
+        function intersectRayPlane(ray, plane) {
+            if (!ray || !plane) {
+                throw new Error('Ray and plane are required');
+            }
+
+            const denom = dot(ray.direction, plane.normal);
+            
+            // Check if ray is parallel to the plane (or nearly parallel)
+            if (Math.abs(denom) < 0.0001) {
+                return -1; // No intersection or infinite intersections
+            }
+            
+            const v = subtract(plane.point, ray.origin);
+            const t = dot(v, plane.normal) / denom;
+            
+            return t > 0 ? t : -1;
+        }
+
+        // Find closest intersection among multiple objects (spheres and planes)
+        function findClosestIntersection(ray, objects) {
+            if (!ray || !objects || !Array.isArray(objects)) {
+                throw new Error('Ray and objects array are required');
+            }
+
+            let closestT = Infinity;
+            let closestObject = null;
+            let intersectionPoint = null;
+
+            for (const object of objects) {
+                let t;
+                if (object instanceof Sphere) {
+                    t = intersectRaySphere(ray, object);
+                } else if (object instanceof Plane) {
+                    t = intersectRayPlane(ray, object);
+                } else {
+                    continue; // Skip unknown object types
+                }
+
+                if (t > 0.001 && t < closestT) { // Small offset to avoid self-shadowing
+                    closestT = t;
+                    closestObject = object;
+                    intersectionPoint = object.getIntersectionPoint(ray, t);
+                }
+            }
+
+            return { 
+                t: closestT, 
+                object: closestObject,
+                point: intersectionPoint
+            };
+        }
+
+        /************** LIGHTING.JS CODE ****************/
+        // Material properties
+        class Material {
+            constructor(ambient, diffuse, specular, shininess, reflectivity = 0.0, transparency = 0.0, refractionIndex = 1.0) {
+                if (!ambient || !diffuse || !specular) {
+                    throw new Error('Material requires ambient, diffuse, and specular properties');
+                }
+                this.ambient = ambient;
+                this.diffuse = diffuse;
+                this.specular = specular;
+                this.shininess = shininess || 32.0;
+                this.reflectivity = reflectivity; // 0.0 = no reflection, 1.0 = perfect mirror
+                this.transparency = transparency; // 0.0 = opaque, 1.0 = fully transparent
+                this.refractionIndex = refractionIndex; // Index of Refraction (1.0 = air, 1.33 = water, 1.5 = glass)
+            }
+        }
+
+        // Light properties
+        class Light {
+            constructor(position, ambient, diffuse, specular) {
+                if (!position) {
+                    throw new Error('Light requires position');
+                }
+                this.position = position;
+                this.ambient = ambient || { r: 0.2, g: 0.2, b: 0.2 };
+                this.diffuse = diffuse || { r: 0.8, g: 0.8, b: 0.8 };
+                this.specular = specular || { r: 1.0, g: 1.0, b: 1.0 };
+            }
+        }
+
+        // Calculate ambient component
+        function calculateAmbient(material, light) {
+            if (!material || !light) {
+                throw new Error('Material and light are required for ambient calculation');
+            }
+            return {
+                r: material.ambient.r * light.ambient.r,
+                g: material.ambient.g * light.ambient.g,
+                b: material.ambient.b * light.ambient.b
+            };
+        }
+
+        // Calculate diffuse component
+        function calculateDiffuse(material, light, normal, lightDir) {
+            if (!material || !light || !normal || !lightDir) {
+                throw new Error('All parameters are required for diffuse calculation');
+            }
+            const dotProduct = Math.max(dot(normal, lightDir), 0);
+            return {
+                r: material.diffuse.r * light.diffuse.r * dotProduct,
+                g: material.diffuse.g * light.diffuse.g * dotProduct,
+                b: material.diffuse.b * light.diffuse.b * dotProduct
+            };
+        }
+
+        // Calculate reflection vector
+        function reflect(incident, normal) {
+            if (!incident || !normal) {
+                throw new Error('Incident and normal vectors are required');
+            }
+            const dotProduct = dot(incident, normal);
+            return subtract(incident, scale(normal, 2 * dotProduct));
+        }
+
+        // Calculate specular component
+        function calculateSpecular(material, light, normal, lightDir, viewDir) {
+            if (!material || !light || !normal || !lightDir || !viewDir) {
+                throw new Error('All parameters are required for specular calculation');
+            }
+            // Note: Reflection of -lightDir because we want to reflect the light ray direction
+            const reflectDir = reflect(scale(lightDir, -1), normal);
+            const spec = Math.pow(Math.max(dot(viewDir, reflectDir), 0), material.shininess);
+            return {
+                r: material.specular.r * light.specular.r * spec,
+                g: material.specular.g * light.specular.g * spec,
+                b: material.specular.b * light.specular.b * spec
+            };
+        }
+
+        // Check if point is in shadow from a light
+        function isInShadow(point, lightPos, objects, currentObject) {
+            // Calculate direction from point to light
+            const lightDir = normalize(subtract(lightPos, point));
+            
+            // Create shadow ray (starting slightly above the surface to avoid self-intersection)
+            const shadowRayOrigin = add(point, scale(lightDir, 0.001));
+            const shadowRay = new Ray(shadowRayOrigin, lightDir);
+            
+            // Find intersections with all objects except the current one
+            const distanceToLight = length(subtract(lightPos, point));
+            
+            for (const object of objects) {
+                // Skip the current object to avoid self-shadowing
+                if (object === currentObject) continue;
+                
+                let t;
+                if (object instanceof Sphere) {
+                    t = intersectRaySphere(shadowRay, object);
+                } else if (object instanceof Plane) {
+                    t = intersectRayPlane(shadowRay, object);
+                }
+                
+                // If there's an intersection between the point and the light, it's in shadow
+                if (t > 0.001 && t < distanceToLight) {
+                    return true;
+                }
+            }
+            
+            return false;
+        }
+
+        // Calculate final color using Phong model with multiple lights, shadows, reflections, and refractions
+        function calculatePhongLighting(material, lights, normal, viewDir, point, objects, currentObject, depth = 0) {
+            if (!material || !lights || !normal || !viewDir || !point || !objects) {
+                throw new Error('All parameters are required for Phong lighting calculation');
+            }
+            
+            // Limit recursion depth to prevent infinite loops
+            if (depth > 5) {
+                return { r: 0, g: 0, b: 0 };
+            }
+            
+            // Start with ambient color from first light (we'll use this as global ambient)
+            let finalColor = {
+                r: material.ambient.r * lights[0].ambient.r,
+                g: material.ambient.g * lights[0].ambient.g,
+                b: material.ambient.b * lights[0].ambient.b
+            };
+            
+            // Add contribution from each light for surface color
+            for (const light of lights) {
+                // Calculate direction from point to light
+                const lightDir = normalize(subtract(light.position, point));
+                
+                // Check if point is in shadow from this light
+                if (isInShadow(point, light.position, objects, currentObject)) {
+                    // Skip diffuse and specular for this light
+                    continue;
+                }
+                
+                // Calculate diffuse component
+                const diffuse = calculateDiffuse(material, light, normal, lightDir);
+                
+                // Calculate specular component
+                const specular = calculateSpecular(material, light, normal, lightDir, viewDir);
+                
+                // Add diffuse and specular components from this light
+                finalColor.r += diffuse.r + specular.r;
+                finalColor.g += diffuse.g + specular.g;
+                finalColor.b += diffuse.b + specular.b;
+            }
+            
+            // Calculate reflection
+            let reflectionColor = { r: 0, g: 0, b: 0 };
+            if (material.reflectivity > 0 && depth < 5) {
+                // Calculate reflection ray
+                const reflectDir = reflect(scale(viewDir, -1), normal);
+                const reflectRayOrigin = add(point, scale(reflectDir, 0.001)); // Slight offset to avoid self-intersection
+                const reflectRay = new Ray(reflectRayOrigin, reflectDir);
+                
+                // Find reflection intersection
+                const reflectIntersection = findClosestIntersection(reflectRay, objects);
+                
+                if (reflectIntersection.object) {
+                    // Get normal at reflection intersection point
+                    let reflectNormal;
+                    if (reflectIntersection.object instanceof Sphere) {
+                        reflectNormal = reflectIntersection.object.getNormal(reflectIntersection.point);
+                    } else if (reflectIntersection.object instanceof Plane) {
+                        reflectNormal = reflectIntersection.object.getNormal();
+                    }
+                    
+                    // Calculate view dir for reflection (from intersection point to reflection ray origin)
+                    const reflectViewDir = normalize(subtract(reflectRay.origin, reflectIntersection.point));
+                    
+                    // Recursively calculate lighting at reflection point
+                    reflectionColor = calculatePhongLighting(
+                        reflectIntersection.object.material,
+                        lights,
+                        reflectNormal,
+                        reflectViewDir,
+                        reflectIntersection.point,
+                        objects,
+                        reflectIntersection.object,
+                        depth + 1
+                    );
+                }
+            }
+            
+            // Calculate refraction
+            let refractionColor = { r: 0, g: 0, b: 0 };
+            if (material.transparency > 0 && depth < 5) {
+                // Calculate refraction direction using Snell's law
+                const refractDir = refract(scale(viewDir, -1), normal, material.refractionIndex);
+                const refractRayOrigin = add(point, scale(refractDir, 0.001)); // Slight offset to avoid self-intersection
+                const refractRay = new Ray(refractRayOrigin, refractDir);
+                
+                // Find refraction intersection
+                const refractIntersection = findClosestIntersection(refractRay, objects);
+                
+                if (refractIntersection.object) {
+                    // Get normal at refraction intersection point
+                    let refractNormal;
+                    if (refractIntersection.object instanceof Sphere) {
+                        refractNormal = refractIntersection.object.getNormal(refractIntersection.point);
+                    } else if (refractIntersection.object instanceof Plane) {
+                        refractNormal = refractIntersection.object.getNormal();
+                    }
+                    
+                    // Calculate view dir for refraction
+                    const refractViewDir = normalize(subtract(refractRay.origin, refractIntersection.point));
+                    
+                    // Recursively calculate lighting at refraction point
+                    refractionColor = calculatePhongLighting(
+                        refractIntersection.object.material,
+                        lights,
+                        refractNormal,
+                        refractViewDir,
+                        refractIntersection.point,
+                        objects,
+                        refractIntersection.object,
+                        depth + 1
+                    );
+                }
+            }
+            
+            // Calculate Fresnel factor for more realistic reflection/refraction mix
+            let kr = material.reflectivity;
+            if (material.transparency > 0) {
+                // Use Fresnel equations to calculate reflection vs. refraction ratio
+                kr = fresnel(viewDir, normal, material.refractionIndex);
+            }
+            
+            // Combine surface, reflection, and refraction colors
+            if (material.transparency > 0) {
+                // For transparent materials, mix reflection and refraction based on Fresnel
+                const kt = 1.0 - kr; // Transmission coefficient
+                finalColor.r = finalColor.r * (1.0 - material.transparency) + 
+                              (reflectionColor.r * kr + refractionColor.r * kt) * material.transparency;
+                finalColor.g = finalColor.g * (1.0 - material.transparency) + 
+                              (reflectionColor.g * kr + refractionColor.g * kt) * material.transparency;
+                finalColor.b = finalColor.b * (1.0 - material.transparency) + 
+                              (reflectionColor.b * kr + refractionColor.b * kt) * material.transparency;
+            } else if (material.reflectivity > 0) {
+                // For reflective but not transparent materials, use simple reflection
+                finalColor.r += reflectionColor.r * material.reflectivity;
+                finalColor.g += reflectionColor.g * material.reflectivity;
+                finalColor.b += reflectionColor.b * material.reflectivity;
+            }
+            
+            // Clamp final color to [0, 1]
+            return {
+                r: Math.min(finalColor.r, 1.0),
+                g: Math.min(finalColor.g, 1.0),
+                b: Math.min(finalColor.b, 1.0)
+            };
+        }
+
+        /************** MAIN CODE ****************/
+        // Initialize and render
+        function init() {
+            try {
+                const canvas = document.getElementById('canvas');
+                const ctx = canvas.getContext('2d');
+                const width = canvas.width;
+                const height = canvas.height;
+
+                // UI controls
+                const iorSlider = document.getElementById('ior-slider');
+                const iorValue = document.getElementById('ior-value');
+                const renderBtn = document.getElementById('render-btn');
+
+                // Create lights (two lights for multiple lighting)
+                const lights = [
+                    new Light(
+                        vec3.fromValues(3, 4, -2), // main light position (top right)
+                        { r: 0.2, g: 0.2, b: 0.2 }, // ambient
+                        { r: 0.8, g: 0.8, b: 0.8 }, // diffuse
+                        { r: 1.0, g: 1.0, b: 1.0 }  // specular
+                    ),
+                    new Light(
+                        vec3.fromValues(-3, 2, -3), // second light position (top left)
+                        { r: 0.1, g: 0.1, b: 0.1 }, // ambient
+                        { r: 0.5, g: 0.5, b: 0.8 }, // diffuse (slightly bluish)
+                        { r: 0.7, g: 0.7, b: 1.0 }  // specular (slightly bluish)
+                    )
+                ];
+
+                // Create materials for objects
+                // Solid red material with reflectivity
+                const redMaterial = new Material(
+                    { r: 0.1, g: 0.0, b: 0.0 },  // ambient
+                    { r: 0.8, g: 0.0, b: 0.0 },  // diffuse
+                    { r: 0.5, g: 0.5, b: 0.5 },  // specular
+                    32.0,                        // shininess
+                    0.2,                         // reflectivity
+                    0.0,                         // transparency (fully opaque)
+                    1.0                          // refractionIndex (not used for opaque objects)
+                );
+
+                // Transparent glass material
+                const glassMaterial = new Material(
+                    { r: 0.02, g: 0.02, b: 0.02 },  // ambient (very low)
+                    { r: 0.1, g: 0.1, b: 0.1 },     // diffuse (low, mostly transparent)
+                    { r: 0.8, g: 0.8, b: 0.8 },     // specular (high, glass is shiny)
+                    128.0,                          // shininess (very high, glass is very shiny)
+                    0.1,                            // reflectivity (glass reflects a bit)
+                    0.95,                           // transparency (highly transparent)
+                    1.5                             // refractionIndex (typical for glass)
+                );
+
+                // Floor material with some reflectivity
+                const floorMaterial = new Material(
+                    { r: 0.1, g: 0.1, b: 0.1 },     // ambient
+                    { r: 0.5, g: 0.5, b: 0.5 },     // diffuse
+                    { r: 0.05, g: 0.05, b: 0.05 },  // specular (less reflective)
+                    8.0,                            // shininess (less shiny)
+                    0.2,                            // reflectivity (slight mirror effect)
+                    0.0,                            // transparency (opaque)
+                    1.0                             // refractionIndex (not used for opaque objects)
+                );
+
+                // Create objects (one solid sphere, one glass sphere, one blue sphere, and a floor)
+                const objects = [
+                    // Solid red sphere
+                    new Sphere(
+                        vec3.fromValues(-1.2, 0, -4.5), // center
+                        1.0, // radius
+                        redMaterial
+                    ),
+                    // Transparent glass sphere
+                    new Sphere(
+                        vec3.fromValues(1.2, 0, -5), // center
+                        1.0, // radius
+                        glassMaterial
+                    ),
+                    // Blue sphere (restored)
+                    new Sphere(
+                        vec3.fromValues(0, 1.3, -6), // center (further back and higher)
+                        1.0, // radius
+                        new Material(
+                            { r: 0.0, g: 0.0, b: 0.1 },  // ambient
+                            { r: 0.0, g: 0.0, b: 0.8 },  // diffuse
+                            { r: 0.3, g: 0.3, b: 0.5 },  // specular
+                            32.0,                        // shininess
+                            0.3,                         // reflectivity
+                            0.0,                         // transparency
+                            1.0                          // refractionIndex
+                        )
+                    ),
+                    // Add a floor plane
+                    new Plane(
+                        vec3.fromValues(0, -1.0, 0), // point on plane (y = -1.0)
+                        vec3.fromValues(0, 1, 0),    // normal pointing up
+                        floorMaterial
+                    )
+                ];
+
+                // Camera position
+                const cameraPos = vec3.fromValues(0, 0, 0);
+
+                // Render the scene with current IoR
+                function render() {
+                    // Get IoR value from slider
+                    const iorValue = parseFloat(iorSlider.value);
+                    
+                    // Update glass sphere material with current IoR
+                    objects[1].material.refractionIndex = iorValue;
+                    
+                    console.log("Rendering started with IoR: " + iorValue);
+                    const imageData = ctx.createImageData(width, height);
+                    const data = imageData.data;
+
+                    // For each pixel
+                    for (let y = 0; y < height; y++) {
+                        for (let x = 0; x < width; x++) {
+                            // Convert pixel coordinates to normalized device coordinates (-1 to 1)
+                            const ndcX = (2.0 * x) / width - 1.0;
+                            const ndcY = 1.0 - (2.0 * y) / height;
+
+                            // Create ray direction
+                            const rayDir = normalize(vec3.fromValues(ndcX, ndcY, -1));
+                            const ray = new Ray(cameraPos, rayDir);
+
+                            // Check intersection with all objects
+                            const intersection = findClosestIntersection(ray, objects);
+
+                            // Calculate pixel index
+                            const pixelIndex = (y * width + x) * 4;
+
+                            if (intersection.object) {
+                                // Get normal from the intersected object
+                                let normal;
+                                if (intersection.object instanceof Sphere) {
+                                    normal = intersection.object.getNormal(intersection.point);
+                                } else if (intersection.object instanceof Plane) {
+                                    normal = intersection.object.getNormal();
+                                }
+
+                                // Calculate view direction
+                                const viewDir = normalize(subtract(cameraPos, intersection.point));
+
+                                // Calculate final color using Phong model with shadows, reflections, and refractions
+                                const finalColor = calculatePhongLighting(
+                                    intersection.object.material,
+                                    lights,
+                                    normal,
+                                    viewDir,
+                                    intersection.point,
+                                    objects,
+                                    intersection.object,
+                                    0 // Initial recursion depth
+                                );
+
+                                // Convert from 0-1 to 0-255 range
+                                data[pixelIndex] = finalColor.r * 255;     // R
+                                data[pixelIndex + 1] = finalColor.g * 255; // G
+                                data[pixelIndex + 2] = finalColor.b * 255; // B
+                                data[pixelIndex + 3] = 255;                // A
+                            } else {
+                                // If no intersection, color the pixel dark blue (sky background)
+                                data[pixelIndex] = 30;      // R
+                                data[pixelIndex + 1] = 30;  // G
+                                data[pixelIndex + 2] = 60;  // B
+                                data[pixelIndex + 3] = 255; // A
+                            }
+                        }
+                    }
+
+                    // Put the image data to the canvas
+                    ctx.putImageData(imageData, 0, 0);
+                    console.log("Rendering completed!");
+                }
+
+                // Update IoR value display when slider changes
+                iorSlider.addEventListener('input', function() {
+                    iorValue.textContent = this.value;
+                });
+
+                // Render button click handler
+                renderBtn.addEventListener('click', function() {
+                    render();
+                });
+
+                // Start rendering with default IoR
+                render();
+            } catch (error) {
+                document.getElementById('error').textContent = 'Error: ' + error.message;
+                console.error('Raytracing error:', error);
+            }
+        }
+
+        // Start the application when page loads
+        window.addEventListener('load', init);
+    </script>
+</body>
+</html>
