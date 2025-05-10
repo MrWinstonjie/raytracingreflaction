@@ -27,56 +27,6 @@ function length(v) {
     return vec3.length(v);
 }
 
-// Refraction calculation (Snell's law)
-function refract(incident, normal, refractionRatio) {
-    const cosi = -Math.min(Math.max(dot(incident, normal), -1.0), 1.0);
-    const etai = cosi > 0 ? refractionRatio : 1.0;
-    const etat = cosi > 0 ? 1.0 : refractionRatio;
-    const eta = etai / etat;
-    
-    const k = 1.0 - eta * eta * (1.0 - cosi * cosi);
-    
-    if (k < 0) {
-        // Total internal reflection
-        return reflect(incident, normal);
-    }
-    
-    const parallPart = scale(incident, eta);
-    const perpPart = scale(normal, eta * cosi - Math.sqrt(k));
-    return normalize(add(parallPart, perpPart));
-}
-
-// Fresnel equation to calculate reflection coefficient
-function fresnel(incident, normal, ior) {
-    // Use approximation of Fresnel equation
-    let cosi = Math.min(Math.max(dot(incident, normal), -1.0), 1.0);
-    let etai = 1.0;
-    let etat = ior;
-    
-    if (cosi > 0) {
-        // Swap indices of refraction if exiting medium
-        const temp = etai;
-        etai = etat;
-        etat = temp;
-    }
-    
-    // Compute sini using Snell's law
-    const sint = etai / etat * Math.sqrt(Math.max(0, 1 - cosi * cosi));
-    
-    // Total internal reflection
-    if (sint >= 1) {
-        return 1.0;
-    }
-    
-    const cost = Math.sqrt(Math.max(0, 1 - sint * sint));
-    cosi = Math.abs(cosi);
-    
-    const Rs = ((etat * cosi) - (etai * cost)) / ((etat * cosi) + (etai * cost));
-    const Rp = ((etai * cosi) - (etat * cost)) / ((etai * cosi) + (etat * cost));
-    
-    return (Rs * Rs + Rp * Rp) / 2;
-}
-
 // Ray structure
 class Ray {
     constructor(origin, direction) {
